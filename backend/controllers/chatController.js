@@ -132,7 +132,7 @@ if (type !== "Tarot") {
   if (!form?.formData) {
     return res.status(400).json({ 
       success: false, 
-      message: `Please fill the required ${type} form.` 
+  message: `Please fill the ${type} form first` 
     });
   }
 
@@ -968,8 +968,7 @@ function reduceToSingleDigit(num) {
 }
 
 
-
- if (type === "Tarot") {
+if (type === "Tarot") {
   try {
     console.log('[Tarot] Starting Tarot reading...');
     
@@ -977,7 +976,7 @@ function reduceToSingleDigit(num) {
 You are Mystara, a deeply intuitive Tarot reader. The user is seeking guidance through the Tarot.
 
 Respond with a spiritual and empowering message. You may pull imaginary cards like The Lovers, The Tower, The Star, etc., and interpret them for the user. Guide them with insight and compassion.
-`.trim();
+    `.trim();
 
     const messagesForAI = [
       { role: "system", content: tarotSystemPrompt },
@@ -1010,7 +1009,7 @@ Respond with a spiritual and empowering message. You may pull imaginary cards li
       stack: err.stack
     });
 
-    const fallback = `🔮 Mystara here... I feel a strong energy around your question. Let's begin your Tarot reading now. Ask what’s on your heart.`;
+   const fallback = "🔮 Mystara here... I feel a strong energy around your question. Let's begin your Tarot reading now. Ask what's on your heart.";
     chat.messages.push({ sender: "ai", text: fallback });
     await chat.save();
 
@@ -1022,6 +1021,7 @@ Respond with a spiritual and empowering message. You may pull imaginary cards li
     });
   }
 }
+
 
 
   } catch (err) {
@@ -1057,7 +1057,7 @@ if (type !== "Tarot") {
   if (!form?.formData) {
     return res.status(400).json({ 
       success: false, 
-      message: `Please fill the required ${type} form.` 
+      message: `Please fill the ${type} form first`  // Fixed indentation here
     });
   }
 
