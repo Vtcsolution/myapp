@@ -220,11 +220,11 @@ Focus especially on:
   });
 }
 
-// ❤️ Love Psychic (Amoura) - Strict Package Compliance
 else if (type === "Love") {
   try {
-    console.log('[Love Psychic] Starting love reading process...');
-    
+    console.log('[Love Psychic] Starting enhanced love reading process...');
+    console.log('[API] Using endpoints: western_chart_data, planets/tropical, synastry_report');
+
     // 1. First check for simple informational queries
     const lowerMessage = message.toLowerCase().trim();
     
@@ -280,41 +280,59 @@ Partner Information:
       });
     }
 
-    // 2. Validate required fields for astrological reading
+    // 2. Validate required fields
     const requiredFields = ['yourName', 'yourBirthDate', 'yourBirthTime', 'yourBirthPlace'];
     const missingFields = requiredFields.filter(field => !f[field]);
     if (missingFields.length > 0) {
-      console.log('[Validation] Missing fields:', missingFields);
       return res.status(400).json({
         success: false,
         message: `Missing required fields: ${missingFields.join(', ')}`
       });
     }
 
-    // 3. Get zodiac signs (manual calculation from user form data)
-    console.log('[Zodiac] Calculating signs from user form data...');
-    const userSign = getSignFromDate(f.yourBirthDate) || 'Unknown';
-    const partnerSign = f.partnerBirthDate ? getSignFromDate(f.partnerBirthDate) : 'Unknown';
-    console.log(`[Zodiac] Signs calculated - User: ${userSign}, Partner: ${partnerSign}`);
-
-    // 4. Get coordinates for both users
-    console.log('[Geocode] Getting coordinates...');
+    // 3. Get coordinates with improved error handling
     let userCoords, partnerCoords;
     try {
       userCoords = await getCoordinatesFromCity(f.yourBirthPlace);
-      partnerCoords = f.partnerPlaceOfBirth ? await getCoordinatesFromCity(f.partnerPlaceOfBirth) : null;
-      console.log(`[Geocode] Coordinates - User: ${JSON.stringify(userCoords)}, Partner: ${JSON.stringify(partnerCoords)}`);
+      console.log(`[Geocode] User coordinates: ${JSON.stringify(userCoords)}`);
+      
+      if (f.partnerPlaceOfBirth) {
+        partnerCoords = await getCoordinatesFromCity(f.partnerPlaceOfBirth);
+        console.log(`[Geocode] Partner coordinates: ${JSON.stringify(partnerCoords)}`);
+      }
     } catch (geoError) {
       console.warn('[Geocode] Error getting coordinates:', geoError.message);
+      // Use default coordinates that will still work for astro calculations
       userCoords = { latitude: 0, longitude: 0 };
       partnerCoords = { latitude: 0, longitude: 0 };
     }
 
-    // 5. Prepare astrology data payloads
-    const buildPayload = (dateStr, timeStr, coords) => {
-      const date = new Date(dateStr);
-      const [hour = 12, min = 0] = timeStr?.split(':').map(Number) || [];
+    // 4. Prepare payloads with timezone and validation
+    const buildPayload = async (dateStr, timeStr, coords) => {
+      // Validate date
+      if (!dateStr || isNaN(new Date(dateStr))) {
+        throw new Error('Invalid date format');
+      }
       
+      const date = new Date(dateStr);
+      const [hour = 12, min = 0] = (timeStr || '').split(':').map(Number);
+      
+      let timezone = 0;
+      try {
+        const tzRes = await axios.post(
+          "https://json.astrologyapi.com/v1/timezone_with_dst",
+          { 
+            latitude: coords.latitude || 0, 
+            longitude: coords.longitude || 0, 
+            date: dateStr 
+          },
+          { auth, timeout: 5000 }
+        );
+        timezone = tzRes.data.timezone;
+      } catch (err) {
+        console.warn("Timezone API error, using default:", err.message);
+      }
+
       return {
         day: date.getDate(),
         month: date.getMonth() + 1,
@@ -323,191 +341,411 @@ Partner Information:
         min: Math.min(59, Math.max(0, min)),
         lat: coords.latitude || 0,
         lon: coords.longitude || 0,
-        tzone: 5.0
+        tzone: timezone
       };
     };
 
-    const userPayload = buildPayload(f.yourBirthDate, f.yourBirthTime, userCoords);
-    const partnerPayload = f.partnerBirthDate ? 
-      buildPayload(f.partnerBirthDate, f.partnerBirthTime, partnerCoords || userCoords) : null;
+    // Build payloads with error handling
+    let userPayload, partnerPayload;
+    try {
+      userPayload = await buildPayload(f.yourBirthDate, f.yourBirthTime, userCoords);
+      console.log('[Payload] User payload prepared');
+      
+      if (f.partnerBirthDate) {
+        partnerPayload = await buildPayload(f.partnerBirthDate, f.partnerBirthTime, partnerCoords || userCoords);
+        console.log('[Payload] Partner payload prepared');
+      }
+    } catch (err) {
+      console.error('[Payload] Error building payload:', err.message);
+      throw new Error('Invalid birth data provided');
+    }
 
-    // 6. Prepare astrology data
-    const astrologyData = {
-      signs: { user: userSign, partner: partnerSign },
-      romantic: null,
-      synastry: null,
-      source: 'Zodiac signs (manual calculation)'
+    // 5. Fetch core astrological data with retry logic
+    console.log('[API] Fetching essential astrological data...');
+    let astrologyData = {
+      userChart: null,
+      partnerChart: null,
+      compatibility: {
+        zodiac: null
+      },
+      planetaryData: {
+        user: {},
+        partner: {}
+      },
+      zodiacSigns: {
+        user: getSignFromDate(f.yourBirthDate),
+        partner: f.partnerBirthDate ? getSignFromDate(f.partnerBirthDate) : null
+      }
     };
 
-    // 7. Get romantic personality from AstrologyAPI
-    console.log('[AstrologyAPI] Attempting romantic personality report...');
-    try {
-      const romanticRes = await axios.post(
-        "https://json.astrologyapi.com/v1/romantic_personality_report/tropical",
-        userPayload,
-        { auth, timeout: 8000 }
-      );
-      
-      astrologyData.romantic = romanticRes.data?.personality || romanticRes.data?.report || null;
-      astrologyData.source = 'AstrologyAPI + Zodiac signs';
-      console.log('[AstrologyAPI] Successfully received romantic personality data');
-    } catch (err) {
-      console.warn('[AstrologyAPI] Failed to get romantic personality:', err.message);
-    }
-
-    // 8. Get synastry report if partner data exists
-    if (partnerPayload) {
-      console.log('[AstrologyAPI] Attempting synastry report...');
+    // Function to fetch with retry
+    const fetchWithRetry = async (url, data, retries = 2) => {
       try {
-        const synastryRes = await axios.post(
-          "https://json.astrologyapi.com/v1/synastry_horoscope",
-          {
-            m_day: userPayload.day,
-            m_month: userPayload.month,
-            m_year: userPayload.year,
-            m_hour: userPayload.hour,
-            m_min: userPayload.min,
-            m_lat: userPayload.lat,
-            m_lon: userPayload.lon,
-            m_tzone: userPayload.tzone,
-            f_day: partnerPayload.day,
-            f_month: partnerPayload.month,
-            f_year: partnerPayload.year,
-            f_hour: partnerPayload.hour,
-            f_min: partnerPayload.min,
-            f_lat: partnerPayload.lat,
-            f_lon: partnerPayload.lon,
-            f_tzone: partnerPayload.tzone
-          },
-          { auth, timeout: 10000 }
-        );
-        astrologyData.synastry = synastryRes.data?.synastry_report || null;
-        if (astrologyData.synastry) {
-          astrologyData.source = 'AstrologyAPI (Romantic+Synastry) + Zodiac signs';
-        }
-        console.log('[AstrologyAPI] Synastry report received');
+        const response = await axios.post(url, data, { auth, timeout: 10000 });
+        return response.data;
       } catch (err) {
-        console.warn('[AstrologyAPI] Failed to get synastry report:', err.message);
+        if (retries > 0) {
+          console.log(`[API] Retrying ${url}... (${retries} left)`);
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          return fetchWithRetry(url, data, retries - 1);
+        }
+        throw err;
       }
+    };
+
+    // Get user's planetary data
+    try {
+      console.log('[API] Getting user chart and planets');
+      const [userChartRes, userPlanetsRes] = await Promise.all([
+        fetchWithRetry("https://json.astrologyapi.com/v1/western_chart_data", userPayload),
+        fetchWithRetry("https://json.astrologyapi.com/v1/planets/tropical", userPayload)
+      ]);
+      
+      astrologyData.userChart = userChartRes;
+      astrologyData.planetaryData.user = userPlanetsRes.reduce((acc, planet) => {
+        const planetName = planet.name.toLowerCase();
+        if (['sun', 'moon', 'venus', 'mars', 'ascendant'].includes(planetName)) {
+          acc[planetName] = {
+            sign: planet.sign,
+            house: planet.house,
+            degree: planet.degree,
+            retrograde: planet.retrograde
+          };
+        }
+        return acc;
+      }, {});
+    } catch (err) {
+      console.error('[API] Error fetching user data:', err.message);
+      throw new Error('Failed to analyze your birth chart');
     }
 
-    // 9. Prepare OpenAI request
-    console.log('[OpenAI] Preparing system message with astrology data...');
-    const systemContent = `
-You are Amoura, a professional love psychic. Provide insights based on:
+    // Get partner's data if available
 
-❤️ Couple Information:
-• ${f.yourName} (${userSign}) - Born ${f.yourBirthDate} in ${f.yourBirthPlace}
-• ${f.partnerName || 'Partner'} (${partnerSign}) - Born ${f.partnerBirthDate || 'unknown'} in ${f.partnerPlaceOfBirth || 'unknown'}
-
-${astrologyData.romantic ? `💖 Romantic Profile:
-${astrologyData.romantic}\n` : ''}
-
-${astrologyData.synastry ? `💫 Relationship Dynamics:
-${astrologyData.synastry}\n` : ''}
-
-Provide a detailed analysis focusing on:
-1. Core compatibility based on zodiac signs (${userSign} & ${partnerSign})
-2. Emotional connection patterns
-3. Communication strengths and challenges
-4. Recommendations for relationship growth
-
-End with: "Start chat with Amoura for deeper love reading — first minute free."
-`.trim();
-
-    console.log('[OpenAI] System message prepared with astrology data');
-
-    const messagesForAI = [
-      { role: "system", content: systemContent },
-      ...chat.messages.map(msg => ({
-        role: msg.sender === "user" ? "user" : "assistant",
-        content: msg.text
-      }))
-    ];
-
-    // 10. Call OpenAI
-    console.log('[OpenAI] Sending request to GPT-4...');
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4",
-      messages: messagesForAI,
-      temperature: 0.7
-    });
-
-    const aiText = completion.choices[0].message.content;
-    console.log('[OpenAI] Received response');
-    
-    // 11. Save and return response
-    chat.messages.push({ sender: "ai", text: aiText });
-    await chat.save();
-    console.log('[Database] Chat message saved');
-
-    console.log('[Success] Response generated with data from:', astrologyData.source);
-    return res.status(200).json({
-      success: true,
-      reply: aiText,
-      messages: chat.messages,
-      astrologyData: {
-        signs: astrologyData.signs,
-        romantic: astrologyData.romantic ? true : false,
-        synastry: astrologyData.synastry ? true : false
+if (partnerPayload) {
+  try {
+    console.log('[API] Getting synastry horoscope for full compatibility');
+    const synastryRes = await axios.post(
+      "https://json.astrologyapi.com/v1/synastry_horoscope/tropical",
+      {
+        profile1: {
+          ...userPayload,
+          name: f.yourName
+        },
+        profile2: {
+          ...partnerPayload,
+          name: f.partnerName
+        }
       },
-      dataSources: astrologyData.source
+      { auth, timeout: 15000 }
+    );
+
+    astrologyData.compatibility = {
+      synastry: synastryRes.data,
+      aspects: synastryRes.data?.aspects || [],
+      score: synastryRes.data?.compatibility_score || null,
+      strengths: synastryRes.data?.strengths || [],
+      challenges: synastryRes.data?.challenges || []
+    };
+
+    console.log('[API] Synastry report received:', {
+      score: astrologyData.compatibility.score,
+      aspectCount: astrologyData.compatibility.aspects.length
     });
 
   } catch (err) {
-    console.error('[Error] Full error details:', {
-      message: err.message,
-      stack: err.stack,
-      response: err.response?.data
+    console.error('[API] Synastry error:', err.message);
+    // Fallback to basic compatibility if synastry fails
+    astrologyData.compatibility = {
+      zodiac: {
+        compatibility_report: generateBasicCompatibility(
+          astrologyData.zodiacSigns.user,
+          astrologyData.zodiacSigns.partner
+        ),
+        isFallback: true
+      }
+    };
+  }
+}
+
+    // 6. Prepare optimized GPT-4 prompt with token management
+    const systemContent = `
+You are Amoura, a love psychic. Create a personalized response using the astrological data.
+Follow these guidelines:
+1. Start by addressing the user by name
+2. Clearly state both zodiac signs
+3. Highlight 3 key compatibility points
+4. Mention any challenging aspects
+5. Keep response under 300 words
+6. Use simple, compassionate language
+7. End with an encouraging note
+
+User Details:
+- Name: ${f.yourName}
+- Zodiac: ${astrologyData.zodiacSigns.user || 'Unknown'}
+
+${f.partnerName ? `
+Partner Details:
+- Name: ${f.partnerName}
+- Zodiac: ${astrologyData.zodiacSigns.partner || 'Unknown'}
+` : ''}
+
+Key Compatibility Factors:
+${astrologyData.compatibility.zodiac ? astrologyData.compatibility.zodiac.compatibility_report : 'No compatibility data available'}
+
+User Question: "${message}"
+`.trim();
+
+    const messagesForAI = [
+      { role: "system", content: systemContent },
+      ...chat.messages.slice(-2).map(msg => ({
+        role: msg.sender === "user" ? "user" : "assistant",
+        content: msg.text.length > 300 ? msg.text.substring(0, 300) + '...' : msg.text
+      }))
+    ];
+
+    // 7. Call GPT-4 with careful token management
+    console.log('[OpenAI] Creating optimized response...');
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4",
+      messages: messagesForAI,
+      temperature: 0.7,
+      max_tokens: 300
     });
+
+    let formattedResponse = completion.choices[0].message.content;
     
-    // Fallback with basic zodiac info
-    const userSign = getSignFromDate(f.yourBirthDate) || 'Unknown';
-    const fallbackText = `Hello dear ${f.yourName}! As a ${userSign}, your love profile shows...\n\nStart chat with Amoura for deeper love reading — first minute free.`;
+    // Add disclaimer if using calculated compatibility
+    if (astrologyData.compatibility.zodiac?.source === 'calculated') {
+      formattedResponse += "\n\nNote: This analysis was calculated from your planetary positions rather than a full compatibility report.";
+    }
+
+    // 8. Save and return response
+    chat.messages.push({ 
+      sender: "ai", 
+      text: formattedResponse,
+      metadata: {
+        zodiacSigns: {
+          user: astrologyData.zodiacSigns.user,
+          partner: astrologyData.zodiacSigns.partner
+        }
+      }
+    });
+    await chat.save();
+
+    return res.status(200).json({
+      success: true,
+      reply: formattedResponse,
+      messages: chat.messages
+    });
+
+  } catch (err) {
+    console.error('[Error] Details:', err);
+    
+    const fallbackText = `Dear ${f.yourName}, I'm having trouble analyzing your chart right now. ` +
+      `Please try again later or provide more complete birth information.`;
     
     chat.messages.push({ sender: "ai", text: fallbackText });
     await chat.save();
-    console.log('[Fallback] Using zodiac-only response');
     
     return res.status(200).json({
       success: true,
       reply: fallbackText,
-      messages: chat.messages,
-      dataSources: 'Zodiac signs (fallback mode)'
+      messages: chat.messages
     });
   }
 }
-else if (type === "Numerology") {
+
+// Helper Functions
+function getSignFromDate(dateString) {
+  const date = new Date(dateString);
+  const month = date.getMonth() + 1;
+  const day = date.getDate();
+  
+  if ((month === 3 && day >= 21) || (month === 4 && day <= 19)) return 'Aries';
+  if ((month === 4 && day >= 20) || (month === 5 && day <= 20)) return 'Taurus';
+  if ((month === 5 && day >= 21) || (month === 6 && day <= 20)) return 'Gemini';
+  if ((month === 6 && day >= 21) || (month === 7 && day <= 22)) return 'Cancer';
+  if ((month === 7 && day >= 23) || (month === 8 && day <= 22)) return 'Leo';
+  if ((month === 8 && day >= 23) || (month === 9 && day <= 22)) return 'Virgo';
+  if ((month === 9 && day >= 23) || (month === 10 && day <= 22)) return 'Libra';
+  if ((month === 10 && day >= 23) || (month === 11 && day <= 21)) return 'Scorpio';
+  if ((month === 11 && day >= 22) || (month === 12 && day <= 21)) return 'Sagittarius';
+  if ((month === 12 && day >= 22) || (month === 1 && day <= 19)) return 'Capricorn';
+  if ((month === 1 && day >= 20) || (month === 2 && day <= 18)) return 'Aquarius';
+  if ((month === 2 && day >= 19) || (month === 3 && day <= 20)) return 'Pisces';
+  return null;
+}
+
+async function generateCompatibilityFromCharts(userPlanets, partnerPlanets, userSign, partnerSign) {
+  // This would analyze planetary aspects between the two charts
+  let report = `Compatibility Analysis for ${userSign} and ${partnerSign}:\n\n`;
+  
+  // Sun Sign Compatibility
+  report += `Sun Signs (Core Personality):\n`;
+  report += `${userSign} and ${partnerSign} ${getSunCompatibility(userSign, partnerSign)}\n\n`;
+  
+  // Moon Sign Compatibility
+  if (userPlanets.moon && partnerPlanets.moon) {
+    report += `Moon Signs (Emotional Needs):\n`;
+    report += `${userPlanets.moon.sign} and ${partnerPlanets.moon.sign} ${getMoonCompatibility(userPlanets.moon.sign, partnerPlanets.moon.sign)}\n\n`;
+  }
+  
+  // Venus-Mars Aspects
+  if (userPlanets.venus && partnerPlanets.mars) {
+    report += `Romantic Chemistry:\n`;
+    report += `Venus in ${userPlanets.venus.sign} with Mars in ${partnerPlanets.mars.sign} ${getVenusMarsCompatibility(userPlanets.venus, partnerPlanets.mars)}\n\n`;
+  }
+  
+  report += `Overall, this pairing shows ${getOverallCompatibility(userSign, partnerSign)} potential.`;
+  
+  return report;
+}
+
+function getSunCompatibility(sign1, sign2) {
+  const compatibility = {
+    'Pisces': {
+      'Cancer': 'have excellent compatibility as both are water signs, creating deep emotional understanding',
+      // [Add other sign combinations...]
+    }
+    // [Add other signs...]
+  };
+  return compatibility[sign1]?.[sign2] || 'show interesting potential that requires understanding and compromise';
+}
+
+// Helper function to format planet data for prompt
+function formatEssentialPlanetDataForPrompt(planetaryData, prefix = '') {
+  if (!planetaryData || Object.keys(planetaryData).length === 0) {
+    return `${prefix}: No planetary data available`;
+  }
+  
+  return Object.entries(planetaryData)
+    .map(([planet, data]) => 
+      `${prefix} ${planet.toUpperCase()}: ${data.sign} (House ${data.house || 'N/A'}) at ${data.degree}°` +
+      `${data.retrograde ? ' (Retrograde)' : ''}`
+    )
+    .join('\n');
+}
+
+// Helper function to generate basic compatibility when API fails
+function generateBasicCompatibility(userSign, partnerSign) {
+  if (!userSign || !partnerSign) return 'Insufficient data for compatibility analysis';
+  
+  const compatibilityKeywords = {
+    'Aries': { good: ['Leo', 'Sagittarius', 'Gemini'], challenging: ['Cancer', 'Capricorn'] },
+    'Taurus': { good: ['Virgo', 'Capricorn', 'Cancer'], challenging: ['Leo', 'Aquarius'] },
+    // Add all other signs...
+    'Pisces': { good: ['Cancer', 'Scorpio', 'Taurus'], challenging: ['Gemini', 'Sagittarius'] }
+  };
+  
+  const userCompat = compatibilityKeywords[userSign] || {};
+  const compatibility = userCompat.good?.includes(partnerSign) ? 'good' :
+                       userCompat.challenging?.includes(partnerSign) ? 'challenging' : 'neutral';
+  
+  return `Basic compatibility between ${userSign} and ${partnerSign} shows ${compatibility} potential. ` +
+         `For deeper insights, a full birth chart analysis is recommended.`;
+}
+
+// Helper function to get active data sources
+function getActiveDataSources(astrologyData) {
+  const sources = [];
+  
+  if (astrologyData.userChart) sources.push('Western Chart');
+  if (astrologyData.planetaryData.user) sources.push('Planetary Positions');
+  
+  if (astrologyData.compatibility.zodiac) sources.push('Zodiac Compatibility');
+  if (astrologyData.partnerChart) sources.push('Partner Chart');
+  
+  sources.push('GPT-4 Formatting');
+  return sources;
+}
+// Helper function to format essential planet data concisely
+function formatEssentialPlanetData(planetaryData) {
+  if (!planetaryData) return 'No planetary data available';
+  
+  return Object.entries(planetaryData)
+    .map(([planet, data]) => 
+      `• ${planet.toUpperCase()}: ${data.sign} (House ${data.house || 'N/A'})`
+    )
+    .join('\n');
+}
+
+// Helper function to format planet data
+function formatPlanetData(planetaryData, reports) {
+  return Object.entries(planetaryData).map(([planet, data]) => {
+    const report = reports[planet] ? 
+      `\n  - ${reports[planet].report || JSON.stringify(reports[planet])}` : '';
+    return `• ${planet.charAt(0).toUpperCase() + planet.slice(1)}: 
+  - Sign: ${data.sign} 
+  - House: ${data.house || 'N/A'}
+  - Degree: ${data.degree}°${report}`;
+  }).join('\n');
+}
+
+// Helper function to get active data sources
+function getActiveDataSources(astrologyData) {
+  const sources = [];
+  
+  if (astrologyData.userChart) sources.push('Western Chart');
+  if (astrologyData.planetaryData.user) sources.push('Planetary Positions');
+  
+  if (astrologyData.compatibility.romantic) sources.push('Romantic Profile');
+  if (astrologyData.compatibility.zodiac) sources.push('Zodiac Compatibility');
+  if (astrologyData.compatibility.matchMaking) sources.push('Match Making');
+  if (astrologyData.compatibility.synastry) sources.push('Synastry Report');
+  
+  sources.push('GPT-4 Formatting');
+  return sources;
+}
+
+ if (type === "Numerology") {
   try {
     console.log('[Numerology] Starting process for:', f.yourName, f.birthDate);
-    
-    // 1. Validate required fields
-    if (!f.yourName || !f.birthDate) {
+
+    // 1. Validate name and date
+    const nameRegex = /^[a-zA-Z\s]+$/;
+    if (!f.yourName || !nameRegex.test(f.yourName.trim())) {
       return res.status(400).json({
         success: false,
-        message: 'Missing name or birth date'
+        message: 'Please enter a valid name (letters only).'
       });
     }
 
-    // 2. Calculate numbers manually (since API endpoints are returning 404)
+    if (!f.birthDate || isNaN(new Date(f.birthDate))) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or missing birth date'
+      });
+    }
+
+    f.yourName = f.yourName.trim().replace(/\s+/g, ' ');
+
+    // 2. Calculate numerology values
     const numerologyData = calculateManualNumbers(f.yourName, f.birthDate);
-    
-    // 3. Handle "my info" request
+console.log('[ManualCalculation] Numerology data:', numerologyData);
+
+    // 3. Handle basic info/profile request
     const lowerMessage = message.toLowerCase().trim();
-    if (lowerMessage.includes('my info') || lowerMessage.includes('profile')) {
+    if (
+      lowerMessage.includes('my info') ||
+      lowerMessage.includes('my profile') ||
+      lowerMessage.includes('numerology profile')
+    ) {
       const profileResponse = `
 🔮 Your Numerology Profile:
 • Life Path Number: ${numerologyData.lifePath}
 • Soul Urge Number: ${numerologyData.soulUrge}
 • Personality Number: ${numerologyData.personality}
 • Expression Number: ${numerologyData.expression}
+${numerologyData.karmicLessons?.length ? `• Karmic Lessons: ${numerologyData.karmicLessons.join(', ')}` : ''}
+${numerologyData.challenges?.length ? `• Challenges: ${formatChallenges(numerologyData.challenges)}` : ''}
 
-Chat with Numara for detailed guidance — first minute free.
+You can now ask: "What does my Life Path number mean?" or "Why is my Soul Urge number 6?"
+Chat with Numara for deeper readings — first minute free.
       `.trim();
-      
-      chat.messages.push({ sender: "ai", text: profileResponse });
+
+      chat.messages.push({ sender: "ai", text: profileResponse, metadata: { numerologyData } });
       await chat.save();
-      
+
       return res.status(200).json({
         success: true,
         reply: profileResponse,
@@ -519,45 +757,42 @@ Chat with Numara for detailed guidance — first minute free.
       });
     }
 
-    // 4. Prepare for GPT-4 analysis when chat starts
-    const systemContent = `
-You are Numara, a professional numerologist. Analyze this profile:
+    // 4. Let GPT answer based on numerologyData + current message
+    const systemPrompt = `
+You are Numara, a professional numerologist. Analyze the user's numerology profile and respond to their question using ONLY the information below.
 
-🧑 Client: ${f.yourName}
-📅 Born: ${f.birthDate}
+Client Name: ${f.yourName}
+Birth Date: ${f.birthDate}
 
 🔢 Core Numbers:
-1. Life Path ${numerologyData.lifePath} - Destiny path
-2. Soul Urge ${numerologyData.soulUrge} - Inner desires
-3. Personality ${numerologyData.personality} - Outer persona
-4. Expression ${numerologyData.expression} - Life purpose
+- Life Path: ${numerologyData.lifePath}
+- Soul Urge: ${numerologyData.soulUrge}
+- Personality: ${numerologyData.personality}
+- Expression: ${numerologyData.expression}
+${numerologyData.karmicLessons?.length ? `- Karmic Lessons: ${numerologyData.karmicLessons.join(', ')}` : ''}
+${numerologyData.challenges?.length ? `- Challenges: ${formatChallenges(numerologyData.challenges)}` : ''}
 
-${numerologyData.challenges ? `⚡ Challenges: ${formatChallenges(numerologyData.challenges)}\n` : ''}
-${numerologyData.karmicLessons ? `🌀 Karmic Lessons: ${numerologyData.karmicLessons.join(', ')}\n` : ''}
+💬 User's Message: "${message}"
 
-Provide a concise 4-part reading:
-1. Life Path meaning
-2. Soul's deepest desires
-3. How others perceive you
-4. Your life purpose
-
-Close with: "Chat with Numara for detailed guidance — first minute free."
+Respond clearly, professionally, and in a helpful tone. Avoid repeating the profile unless asked. Keep it under 350 words.
     `.trim();
 
     const messagesForAI = [
-      { role: "system", content: systemContent },
+      { role: "system", content: systemPrompt },
       { role: "user", content: message }
     ];
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4",
       messages: messagesForAI,
-      temperature: 0.7,
-      max_tokens: 350
+      temperature: 0.6,
+      max_tokens: 400
     });
 
     const aiText = completion.choices[0].message.content;
-    chat.messages.push({ sender: "ai", text: aiText });
+
+    // 5. Save and respond
+    chat.messages.push({ sender: "ai", text: aiText, metadata: { numerologyData } });
     await chat.save();
 
     return res.status(200).json({
@@ -576,12 +811,12 @@ Close with: "Chat with Numara for detailed guidance — first minute free."
       stack: err.stack,
       response: err.response?.data
     });
-    
-    const fallbackText = `🔮 Numerology Insight for ${f.yourName}:\nWe're preparing your reading. Please ask your question to begin.\n\nChat with Numara for detailed guidance — first minute free.`;
-    
+
+    const fallbackText = `🔮 Numerology Insight for ${f.yourName || 'you'}:\nWe’re preparing your reading. Please ask your question to begin.\n\nChat with Numara for detailed guidance — first minute free.`;
+
     chat.messages.push({ sender: "ai", text: fallbackText });
     await chat.save();
-    
+
     return res.status(200).json({
       success: true,
       reply: fallbackText,
@@ -589,6 +824,7 @@ Close with: "Chat with Numara for detailed guidance — first minute free."
     });
   }
 }
+
 
 // Helper functions
 function formatChallenges(challenges) {
